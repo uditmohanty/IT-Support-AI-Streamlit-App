@@ -5,5 +5,4 @@ google-generativeai==0.3.2
 python-dotenv==1.0.0
 plotly==5.17.0
 jira==3.5.2
-streamlit-authenticator==0.2.3
-sqlite3
+streamlit-authenticator==0.2.4
