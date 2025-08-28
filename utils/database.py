@@ -25,22 +25,29 @@ class Database:
         if self.database_url:
             # Parse the database URL
             parsed = urlparse(self.database_url)
-            return {
+            params = {
                 'host': parsed.hostname,
-                'database': parsed.path[1:] if parsed.path else 'postgres',
+                'database': parsed.path[1:] if parsed.path else 'neondb',
                 'user': parsed.username,
                 'password': parsed.password,
                 'port': parsed.port or 5432
             }
+            
+            # Add SSL mode for Neon (required)
+            if 'sslmode=require' in self.database_url:
+                params['ssl_context'] = True
+                
+            return params
         else:
-            # Try to get from Streamlit secrets first, then environment variables
+            # Fallback to individual parameters
             try:
                 return {
-                    'host': st.secrets.get("SUPABASE_HOST", os.getenv("SUPABASE_HOST")),
-                    'database': st.secrets.get("SUPABASE_DATABASE", os.getenv("SUPABASE_DATABASE", "postgres")),
-                    'user': st.secrets.get("SUPABASE_USER", os.getenv("SUPABASE_USER", "postgres")),
-                    'password': st.secrets.get("SUPABASE_PASSWORD", os.getenv("SUPABASE_PASSWORD")),
-                    'port': int(st.secrets.get("SUPABASE_PORT", os.getenv("SUPABASE_PORT", "5432")))
+                    'host': st.secrets.get("NEON_HOST", os.getenv("NEON_HOST")),
+                    'database': st.secrets.get("NEON_DATABASE", os.getenv("NEON_DATABASE", "neondb")),
+                    'user': st.secrets.get("NEON_USER", os.getenv("NEON_USER")),
+                    'password': st.secrets.get("NEON_PASSWORD", os.getenv("NEON_PASSWORD")),
+                    'port': int(st.secrets.get("NEON_PORT", os.getenv("NEON_PORT", "5432"))),
+                    'ssl_context': True
                 }
             except Exception as e:
                 st.error(f"Failed to get database credentials: {str(e)}")
@@ -56,13 +63,20 @@ class Database:
     
     def get_connection(self):
         """Get database connection"""
-        return pg8000.connect(**self.connection_params)
+        try:
+            return pg8000.connect(**self.connection_params)
+        except Exception as e:
+            # Try without SSL context if it fails
+            params_no_ssl = self.connection_params.copy()
+            params_no_ssl.pop('ssl_context', None)
+            return pg8000.connect(**params_no_ssl)
     
     def save_tickets(self, tickets):
         """Save tickets to database"""
         if not tickets:
             return True
             
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -91,22 +105,28 @@ class Database:
                 ])
             
             conn.commit()
-            conn.close()
             return True
             
         except Exception as e:
             st.error(f"Failed to save tickets: {str(e)}")
-            if 'conn' in locals():
-                conn.close()
+            if conn:
+                conn.rollback()
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def save_processed_ticket(self, ticket_id, analysis):
         """Save processed ticket analysis"""
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
             
             processed_id = f"processed_{ticket_id}_{int(datetime.now().timestamp())}"
+            
+            # Ensure analysis is properly serialized
+            analysis_json = json.dumps(analysis) if isinstance(analysis, dict) else str(analysis)
             
             cursor.execute('''
                 INSERT INTO processed_tickets 
@@ -115,24 +135,27 @@ class Database:
             ''', [
                 processed_id,
                 ticket_id,
-                json.dumps(analysis),
-                analysis.get('confidence', 0.5),
+                analysis_json,
+                analysis.get('confidence', 0.5) if isinstance(analysis, dict) else 0.5,
                 datetime.now(),
                 'pending'
             ])
             
             conn.commit()
-            conn.close()
             return True
             
         except Exception as e:
             st.error(f"Failed to save processed ticket: {str(e)}")
-            if 'conn' in locals():
-                conn.close()
+            if conn:
+                conn.rollback()
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def get_tickets(self, status_filter=None, limit=100):
         """Get tickets from database"""
+        conn = None
         try:
             conn = self.get_connection()
             
@@ -143,17 +166,18 @@ class Database:
                 query = "SELECT * FROM tickets ORDER BY created DESC LIMIT %s"
                 df = pd.read_sql_query(query, conn, params=[limit])
             
-            conn.close()
             return df
             
         except Exception as e:
             st.error(f"Failed to get tickets: {str(e)}")
-            if 'conn' in locals():
-                conn.close()
             return pd.DataFrame()
+        finally:
+            if conn:
+                conn.close()
     
     def get_processed_tickets(self, status_filter=None, limit=50):
         """Get processed tickets with analysis"""
+        conn = None
         try:
             conn = self.get_connection()
             
@@ -173,23 +197,49 @@ class Database:
             
             df = pd.read_sql_query(query, conn, params=params)
             
-            # Parse analysis JSON
+            # Safe JSON parsing with proper error handling
             if not df.empty:
-                df['analysis_parsed'] = df['analysis'].apply(
-                    lambda x: json.loads(x) if x else {}
-                )
+                def safe_json_parse(x):
+                    """Safely parse JSON data from various formats"""
+                    if pd.isna(x) or x is None:
+                        return {}
+                    
+                    try:
+                        # If it's already a dict, return it
+                        if isinstance(x, dict):
+                            return x
+                        
+                        # If it's a string, parse it
+                        if isinstance(x, str):
+                            if x.strip() == '':
+                                return {}
+                            return json.loads(x)
+                        
+                        # If it's bytes, decode and parse
+                        if isinstance(x, (bytes, bytearray)):
+                            return json.loads(x.decode('utf-8'))
+                        
+                        # Try to convert to string and parse
+                        return json.loads(str(x))
+                        
+                    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                        # If all else fails, return empty dict
+                        return {}
+                
+                df['analysis_parsed'] = df['analysis'].apply(safe_json_parse)
             
-            conn.close()
             return df
             
         except Exception as e:
             st.error(f"Failed to get processed tickets: {str(e)}")
-            if 'conn' in locals():
-                conn.close()
             return pd.DataFrame()
+        finally:
+            if conn:
+                conn.close()
     
     def save_feedback(self, ticket_id, agent_id, rating, action, comments):
         """Save agent feedback"""
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -201,54 +251,92 @@ class Database:
             ''', [ticket_id, agent_id, rating, action, comments, datetime.now()])
             
             conn.commit()
-            conn.close()
             return True
             
         except Exception as e:
             st.error(f"Failed to save feedback: {str(e)}")
-            if 'conn' in locals():
-                conn.close()
+            if conn:
+                conn.rollback()
             return False
+        finally:
+            if conn:
+                conn.close()
     
     def get_dashboard_metrics(self):
-        """Get metrics for dashboard"""
+        """Get metrics for dashboard with proper error handling"""
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
             
-            metrics = {}
+            metrics = {
+                'total_tickets': 0,
+                'processed_tickets': 0,
+                'avg_confidence': 0,
+                'pending_tickets': 0,
+                'avg_feedback': 0
+            }
             
             # Total tickets
-            cursor.execute("SELECT COUNT(*) FROM tickets")
-            metrics['total_tickets'] = cursor.fetchone()[0]
+            try:
+                cursor.execute("SELECT COUNT(*) FROM tickets")
+                result = cursor.fetchone()
+                metrics['total_tickets'] = result[0] if result else 0
+            except Exception:
+                metrics['total_tickets'] = 0
             
             # Processed tickets
-            cursor.execute("SELECT COUNT(*) FROM processed_tickets")
-            metrics['processed_tickets'] = cursor.fetchone()[0]
+            try:
+                cursor.execute("SELECT COUNT(*) FROM processed_tickets")
+                result = cursor.fetchone()
+                metrics['processed_tickets'] = result[0] if result else 0
+            except Exception:
+                metrics['processed_tickets'] = 0
             
             # Average confidence
-            cursor.execute("SELECT AVG(confidence) FROM processed_tickets")
-            result = cursor.fetchone()[0]
-            metrics['avg_confidence'] = float(result) if result else 0
+            try:
+                cursor.execute("SELECT AVG(confidence) FROM processed_tickets WHERE confidence IS NOT NULL")
+                result = cursor.fetchone()
+                if result and result[0] is not None:
+                    metrics['avg_confidence'] = float(result[0])
+                else:
+                    metrics['avg_confidence'] = 0
+            except Exception:
+                metrics['avg_confidence'] = 0
             
-            # Pending tickets
-            metrics['pending_tickets'] = metrics['total_tickets'] - metrics['processed_tickets']
+            # Pending tickets (ensure non-negative)
+            metrics['pending_tickets'] = max(0, metrics['total_tickets'] - metrics['processed_tickets'])
             
             # Recent feedback average
-            cursor.execute('''
-                SELECT AVG(rating) FROM agent_feedback 
-                WHERE timestamp > NOW() - INTERVAL '7 days'
-            ''')
-            result = cursor.fetchone()[0]
-            metrics['avg_feedback'] = float(result) if result else 0
+            try:
+                cursor.execute('''
+                    SELECT AVG(rating) FROM agent_feedback 
+                    WHERE timestamp > NOW() - INTERVAL '7 days' AND rating IS NOT NULL
+                ''')
+                result = cursor.fetchone()
+                if result and result[0] is not None:
+                    metrics['avg_feedback'] = float(result[0])
+                else:
+                    metrics['avg_feedback'] = 0
+            except Exception:
+                # Fallback query for databases that don't support INTERVAL
+                try:
+                    cursor.execute('''
+                        SELECT AVG(rating) FROM agent_feedback 
+                        WHERE rating IS NOT NULL
+                    ''')
+                    result = cursor.fetchone()
+                    if result and result[0] is not None:
+                        metrics['avg_feedback'] = float(result[0])
+                    else:
+                        metrics['avg_feedback'] = 0
+                except Exception:
+                    metrics['avg_feedback'] = 0
             
-            conn.close()
             return metrics
             
         except Exception as e:
             st.error(f"Failed to get metrics: {str(e)}")
-            if 'conn' in locals():
-                conn.close()
             return {
                 'total_tickets': 0,
                 'processed_tickets': 0,
@@ -256,9 +344,13 @@ class Database:
                 'pending_tickets': 0,
                 'avg_feedback': 0
             }
+        finally:
+            if conn:
+                conn.close()
     
     def log_system_event(self, function_name, status, details=""):
         """Log system events"""
+        conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
@@ -269,8 +361,64 @@ class Database:
             ''', [datetime.now(), function_name, status, details])
             
             conn.commit()
-            conn.close()
+            
+        except Exception:
+            # Don't show error for logging failures, but still ensure cleanup
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    
+    def cleanup_orphaned_processed_tickets(self):
+        """Clean up processed tickets that reference non-existent tickets"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                DELETE FROM processed_tickets 
+                WHERE ticket_id NOT IN (SELECT id FROM tickets)
+            ''')
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            
+            if deleted_count > 0:
+                st.info(f"Cleaned up {deleted_count} orphaned processed tickets")
+            
+            return deleted_count
             
         except Exception as e:
-            # Don't show error for logging failures
-            pass
+            st.error(f"Failed to cleanup orphaned tickets: {str(e)}")
+            if conn:
+                conn.rollback()
+            return 0
+        finally:
+            if conn:
+                conn.close()
+    
+    def get_ticket_by_id(self, ticket_id):
+        """Get a specific ticket by ID"""
+        conn = None
+        try:
+            conn = self.get_connection()
+            
+            query = "SELECT * FROM tickets WHERE id = %s"
+            df = pd.read_sql_query(query, conn, params=[ticket_id])
+            
+            return df.iloc[0].to_dict() if not df.empty else None
+            
+        except Exception as e:
+            st.error(f"Failed to get ticket {ticket_id}: {str(e)}")
+            return None
+        finally:
+            if conn:
+                conn.close()
