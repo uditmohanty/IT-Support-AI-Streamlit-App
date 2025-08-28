@@ -6,4 +6,8 @@ python-dotenv==1.0.0
 plotly==5.17.0
 jira==3.5.2
 streamlit-authenticator==0.2.3
+<<<<<<< HEAD
 psycopg2-binary
+=======
+psycopg2-binary
+>>>>>>> 5c367ab32277949c69cbee2eed0c6556e37b1191
