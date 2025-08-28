@@ -1,1 +1,6 @@
 .streamlit/secrets.toml 
+# Environment files
+.env
+*.env
+test_jira_debug*
+*_debug*
