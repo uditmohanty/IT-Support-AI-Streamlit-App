@@ -1,30 +1,50 @@
-import psycopg2
+import pg8000
 import pandas as pd
 import json
 from datetime import datetime
 import streamlit as st
-from psycopg2.extras import RealDictCursor
 import os
+from urllib.parse import urlparse
 
 class Database:
     def __init__(self):
+        self.database_url = self._get_database_url()
         self.connection_params = self._get_connection_params()
         self._test_connection()
     
+    def _get_database_url(self):
+        """Get direct database URL connection string"""
+        try:
+            # Try Streamlit secrets first, then environment variables
+            return st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
+        except Exception:
+            return os.getenv("DATABASE_URL")
+    
     def _get_connection_params(self):
         """Get database connection parameters"""
-        # Try to get from Streamlit secrets first, then environment variables
-        try:
+        if self.database_url:
+            # Parse the database URL
+            parsed = urlparse(self.database_url)
             return {
-                'host': st.secrets.get("SUPABASE_HOST", os.getenv("SUPABASE_HOST")),
-                'database': st.secrets.get("SUPABASE_DATABASE", os.getenv("SUPABASE_DATABASE", "postgres")),
-                'user': st.secrets.get("SUPABASE_USER", os.getenv("SUPABASE_USER", "postgres")),
-                'password': st.secrets.get("SUPABASE_PASSWORD", os.getenv("SUPABASE_PASSWORD")),
-                'port': st.secrets.get("SUPABASE_PORT", os.getenv("SUPABASE_PORT", "5432"))
+                'host': parsed.hostname,
+                'database': parsed.path[1:] if parsed.path else 'postgres',
+                'user': parsed.username,
+                'password': parsed.password,
+                'port': parsed.port or 5432
             }
-        except Exception as e:
-            st.error(f"Failed to get database credentials: {str(e)}")
-            return {}
+        else:
+            # Try to get from Streamlit secrets first, then environment variables
+            try:
+                return {
+                    'host': st.secrets.get("SUPABASE_HOST", os.getenv("SUPABASE_HOST")),
+                    'database': st.secrets.get("SUPABASE_DATABASE", os.getenv("SUPABASE_DATABASE", "postgres")),
+                    'user': st.secrets.get("SUPABASE_USER", os.getenv("SUPABASE_USER", "postgres")),
+                    'password': st.secrets.get("SUPABASE_PASSWORD", os.getenv("SUPABASE_PASSWORD")),
+                    'port': int(st.secrets.get("SUPABASE_PORT", os.getenv("SUPABASE_PORT", "5432")))
+                }
+            except Exception as e:
+                st.error(f"Failed to get database credentials: {str(e)}")
+                return {}
     
     def _test_connection(self):
         """Test database connection"""
@@ -36,7 +56,7 @@ class Database:
     
     def get_connection(self):
         """Get database connection"""
-        return psycopg2.connect(**self.connection_params)
+        return pg8000.connect(**self.connection_params)
     
     def save_tickets(self, tickets):
         """Save tickets to database"""
@@ -64,11 +84,11 @@ class Database:
                         status = EXCLUDED.status,
                         reporter = EXCLUDED.reporter,
                         updated = EXCLUDED.updated
-                ''', (
+                ''', [
                     ticket['id'], ticket['summary'], ticket['description'],
                     ticket['category'], ticket['priority'], ticket['status'],
                     ticket['reporter'], created, updated
-                ))
+                ])
             
             conn.commit()
             conn.close()
@@ -92,14 +112,14 @@ class Database:
                 INSERT INTO processed_tickets 
                 (id, ticket_id, analysis, confidence, processed_date, status)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            ''', (
+            ''', [
                 processed_id,
                 ticket_id,
                 json.dumps(analysis),
                 analysis.get('confidence', 0.5),
                 datetime.now(),
                 'pending'
-            ))
+            ])
             
             conn.commit()
             conn.close()
@@ -118,10 +138,10 @@ class Database:
             
             if status_filter:
                 query = "SELECT * FROM tickets WHERE status = %s ORDER BY created DESC LIMIT %s"
-                df = pd.read_sql_query(query, conn, params=(status_filter, limit))
+                df = pd.read_sql_query(query, conn, params=[status_filter, limit])
             else:
                 query = "SELECT * FROM tickets ORDER BY created DESC LIMIT %s"
-                df = pd.read_sql_query(query, conn, params=(limit,))
+                df = pd.read_sql_query(query, conn, params=[limit])
             
             conn.close()
             return df
@@ -178,7 +198,7 @@ class Database:
                 INSERT INTO agent_feedback 
                 (ticket_id, agent_id, rating, action, comments, timestamp)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            ''', (ticket_id, agent_id, rating, action, comments, datetime.now()))
+            ''', [ticket_id, agent_id, rating, action, comments, datetime.now()])
             
             conn.commit()
             conn.close()
@@ -194,21 +214,21 @@ class Database:
         """Get metrics for dashboard"""
         try:
             conn = self.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor = conn.cursor()
             
             metrics = {}
             
             # Total tickets
-            cursor.execute("SELECT COUNT(*) as count FROM tickets")
-            metrics['total_tickets'] = cursor.fetchone()['count']
+            cursor.execute("SELECT COUNT(*) FROM tickets")
+            metrics['total_tickets'] = cursor.fetchone()[0]
             
             # Processed tickets
-            cursor.execute("SELECT COUNT(*) as count FROM processed_tickets")
-            metrics['processed_tickets'] = cursor.fetchone()['count']
+            cursor.execute("SELECT COUNT(*) FROM processed_tickets")
+            metrics['processed_tickets'] = cursor.fetchone()[0]
             
             # Average confidence
-            cursor.execute("SELECT AVG(confidence) as avg_conf FROM processed_tickets")
-            result = cursor.fetchone()['avg_conf']
+            cursor.execute("SELECT AVG(confidence) FROM processed_tickets")
+            result = cursor.fetchone()[0]
             metrics['avg_confidence'] = float(result) if result else 0
             
             # Pending tickets
@@ -216,10 +236,10 @@ class Database:
             
             # Recent feedback average
             cursor.execute('''
-                SELECT AVG(rating) as avg_rating FROM agent_feedback 
+                SELECT AVG(rating) FROM agent_feedback 
                 WHERE timestamp > NOW() - INTERVAL '7 days'
             ''')
-            result = cursor.fetchone()['avg_rating']
+            result = cursor.fetchone()[0]
             metrics['avg_feedback'] = float(result) if result else 0
             
             conn.close()
@@ -246,7 +266,7 @@ class Database:
             cursor.execute('''
                 INSERT INTO system_logs (timestamp, function_name, status, details)
                 VALUES (%s, %s, %s, %s)
-            ''', (datetime.now(), function_name, status, details))
+            ''', [datetime.now(), function_name, status, details])
             
             conn.commit()
             conn.close()
@@ -254,5 +274,3 @@ class Database:
         except Exception as e:
             # Don't show error for logging failures
             pass
-            
-       
