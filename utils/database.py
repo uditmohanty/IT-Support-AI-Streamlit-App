@@ -1,107 +1,42 @@
-import sqlite3
+import psycopg2
 import pandas as pd
 import json
 from datetime import datetime
-from config import Config
 import streamlit as st
+from psycopg2.extras import RealDictCursor
 import os
 
 class Database:
     def __init__(self):
-        # Handle different database URL formats
-        database_url = Config.DATABASE_URL
-        if database_url.startswith('sqlite:///'):
-            self.db_path = database_url.replace('sqlite:///', '')
-        else:
-            self.db_path = database_url
-        
-        # Ensure directory exists
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-        
-        self.init_database()
+        self.connection_params = self._get_connection_params()
+        self._test_connection()
     
-    def init_database(self):
-        """Initialize SQLite database with required tables"""
+    def _get_connection_params(self):
+        """Get database connection parameters"""
+        # Try to get from Streamlit secrets first, then environment variables
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Tickets table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS tickets (
-                    id TEXT PRIMARY KEY,
-                    summary TEXT,
-                    description TEXT,
-                    category TEXT,
-                    priority TEXT,
-                    status TEXT,
-                    reporter TEXT,
-                    created TEXT,
-                    updated TEXT
-                )
-            ''')
-            
-            # Processed tickets table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS processed_tickets (
-                    id TEXT PRIMARY KEY,
-                    ticket_id TEXT,
-                    analysis TEXT,
-                    confidence REAL,
-                    processed_date TEXT,
-                    status TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets (id)
-                )
-            ''')
-            
-            # Agent feedback table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS agent_feedback (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ticket_id TEXT,
-                    agent_id TEXT,
-                    rating INTEGER,
-                    action TEXT,
-                    comments TEXT,
-                    timestamp TEXT,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets (id)
-                )
-            ''')
-            
-            # Knowledge base table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS knowledge_base (
-                    id TEXT PRIMARY KEY,
-                    title TEXT,
-                    category TEXT,
-                    description TEXT,
-                    solution TEXT,
-                    tags TEXT,
-                    quality_score REAL,
-                    created TEXT,
-                    updated TEXT
-                )
-            ''')
-            
-            # System logs table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS system_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT,
-                    function_name TEXT,
-                    status TEXT,
-                    details TEXT
-                )
-            ''')
-            
-            conn.commit()
-            conn.close()
-            
+            return {
+                'host': st.secrets.get("SUPABASE_HOST", os.getenv("SUPABASE_HOST")),
+                'database': st.secrets.get("SUPABASE_DATABASE", os.getenv("SUPABASE_DATABASE", "postgres")),
+                'user': st.secrets.get("SUPABASE_USER", os.getenv("SUPABASE_USER", "postgres")),
+                'password': st.secrets.get("SUPABASE_PASSWORD", os.getenv("SUPABASE_PASSWORD")),
+                'port': st.secrets.get("SUPABASE_PORT", os.getenv("SUPABASE_PORT", "5432"))
+            }
         except Exception as e:
-            print(f"Database initialization failed: {str(e)}")
-            # Don't show streamlit error here as it might not be available
+            st.error(f"Failed to get database credentials: {str(e)}")
+            return {}
+    
+    def _test_connection(self):
+        """Test database connection"""
+        try:
+            conn = self.get_connection()
+            conn.close()
+        except Exception as e:
+            st.error(f"Database connection failed: {str(e)}")
+    
+    def get_connection(self):
+        """Get database connection"""
+        return psycopg2.connect(**self.connection_params)
     
     def save_tickets(self, tickets):
         """Save tickets to database"""
@@ -109,24 +44,30 @@ class Database:
             return True
             
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
+            cursor = conn.cursor()
             
             for ticket in tickets:
-                # Insert or update ticket
-                conn.execute('''
-                    INSERT OR REPLACE INTO tickets 
+                # Convert datetime strings to proper format
+                created = ticket.get('created')
+                updated = ticket.get('updated')
+                
+                cursor.execute('''
+                    INSERT INTO tickets 
                     (id, summary, description, category, priority, status, reporter, created, updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        summary = EXCLUDED.summary,
+                        description = EXCLUDED.description,
+                        category = EXCLUDED.category,
+                        priority = EXCLUDED.priority,
+                        status = EXCLUDED.status,
+                        reporter = EXCLUDED.reporter,
+                        updated = EXCLUDED.updated
                 ''', (
-                    ticket.get('id', ''),
-                    ticket.get('summary', ''),
-                    ticket.get('description', ''),
-                    ticket.get('category', ''),
-                    ticket.get('priority', ''),
-                    ticket.get('status', ''),
-                    ticket.get('reporter', ''),
-                    ticket.get('created', ''),
-                    ticket.get('updated', '')
+                    ticket['id'], ticket['summary'], ticket['description'],
+                    ticket['category'], ticket['priority'], ticket['status'],
+                    ticket['reporter'], created, updated
                 ))
             
             conn.commit()
@@ -134,24 +75,29 @@ class Database:
             return True
             
         except Exception as e:
-            print(f"Failed to save tickets: {str(e)}")
+            st.error(f"Failed to save tickets: {str(e)}")
+            if 'conn' in locals():
+                conn.close()
             return False
     
     def save_processed_ticket(self, ticket_id, analysis):
         """Save processed ticket analysis"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
+            cursor = conn.cursor()
             
-            conn.execute('''
-                INSERT OR REPLACE INTO processed_tickets 
+            processed_id = f"processed_{ticket_id}_{int(datetime.now().timestamp())}"
+            
+            cursor.execute('''
+                INSERT INTO processed_tickets 
                 (id, ticket_id, analysis, confidence, processed_date, status)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             ''', (
-                f"processed_{ticket_id}_{int(datetime.now().timestamp())}",
+                processed_id,
                 ticket_id,
                 json.dumps(analysis),
                 analysis.get('confidence', 0.5),
-                datetime.now().isoformat(),
+                datetime.now(),
                 'pending'
             ))
             
@@ -160,32 +106,36 @@ class Database:
             return True
             
         except Exception as e:
-            print(f"Failed to save processed ticket: {str(e)}")
+            st.error(f"Failed to save processed ticket: {str(e)}")
+            if 'conn' in locals():
+                conn.close()
             return False
     
     def get_tickets(self, status_filter=None, limit=100):
         """Get tickets from database"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
             
             if status_filter:
-                query = "SELECT * FROM tickets WHERE status = ? ORDER BY created DESC LIMIT ?"
+                query = "SELECT * FROM tickets WHERE status = %s ORDER BY created DESC LIMIT %s"
                 df = pd.read_sql_query(query, conn, params=(status_filter, limit))
             else:
-                query = "SELECT * FROM tickets ORDER BY created DESC LIMIT ?"
+                query = "SELECT * FROM tickets ORDER BY created DESC LIMIT %s"
                 df = pd.read_sql_query(query, conn, params=(limit,))
             
             conn.close()
             return df
             
         except Exception as e:
-            print(f"Failed to get tickets: {str(e)}")
+            st.error(f"Failed to get tickets: {str(e)}")
+            if 'conn' in locals():
+                conn.close()
             return pd.DataFrame()
     
     def get_processed_tickets(self, status_filter=None, limit=50):
         """Get processed tickets with analysis"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
             
             query = '''
                 SELECT pt.*, t.summary, t.category, t.priority, t.description
@@ -193,14 +143,13 @@ class Database:
                 JOIN tickets t ON pt.ticket_id = t.id
             '''
             
+            params = []
             if status_filter:
-                query += " WHERE pt.status = ?"
-                params = (status_filter,)
-            else:
-                params = ()
+                query += " WHERE pt.status = %s"
+                params.append(status_filter)
             
-            query += " ORDER BY pt.processed_date DESC LIMIT ?"
-            params += (limit,)
+            query += " ORDER BY pt.processed_date DESC LIMIT %s"
+            params.append(limit)
             
             df = pd.read_sql_query(query, conn, params=params)
             
@@ -214,62 +163,72 @@ class Database:
             return df
             
         except Exception as e:
-            print(f"Failed to get processed tickets: {str(e)}")
+            st.error(f"Failed to get processed tickets: {str(e)}")
+            if 'conn' in locals():
+                conn.close()
             return pd.DataFrame()
     
     def save_feedback(self, ticket_id, agent_id, rating, action, comments):
         """Save agent feedback"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
+            cursor = conn.cursor()
             
-            conn.execute('''
+            cursor.execute('''
                 INSERT INTO agent_feedback 
                 (ticket_id, agent_id, rating, action, comments, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (ticket_id, agent_id, rating, action, comments, datetime.now().isoformat()))
+                VALUES (%s, %s, %s, %s, %s, %s)
+            ''', (ticket_id, agent_id, rating, action, comments, datetime.now()))
             
             conn.commit()
             conn.close()
             return True
             
         except Exception as e:
-            print(f"Failed to save feedback: {str(e)}")
+            st.error(f"Failed to save feedback: {str(e)}")
+            if 'conn' in locals():
+                conn.close()
             return False
     
     def get_dashboard_metrics(self):
         """Get metrics for dashboard"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             
             metrics = {}
             
             # Total tickets
-            result = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()
-            metrics['total_tickets'] = result[0] if result else 0
+            cursor.execute("SELECT COUNT(*) as count FROM tickets")
+            metrics['total_tickets'] = cursor.fetchone()['count']
             
             # Processed tickets
-            result = conn.execute("SELECT COUNT(*) FROM processed_tickets").fetchone()
-            metrics['processed_tickets'] = result[0] if result else 0
+            cursor.execute("SELECT COUNT(*) as count FROM processed_tickets")
+            metrics['processed_tickets'] = cursor.fetchone()['count']
             
             # Average confidence
-            result = conn.execute("SELECT AVG(confidence) FROM processed_tickets").fetchone()
-            metrics['avg_confidence'] = result[0] if result and result[0] else 0
+            cursor.execute("SELECT AVG(confidence) as avg_conf FROM processed_tickets")
+            result = cursor.fetchone()['avg_conf']
+            metrics['avg_confidence'] = float(result) if result else 0
             
             # Pending tickets
             metrics['pending_tickets'] = metrics['total_tickets'] - metrics['processed_tickets']
             
-            # Recent feedback
-            feedback_result = conn.execute('''
-                SELECT AVG(rating) FROM agent_feedback 
-                WHERE timestamp > datetime('now', '-7 days')
-            ''').fetchone()
-            metrics['avg_feedback'] = feedback_result[0] if feedback_result and feedback_result[0] else 0
+            # Recent feedback average
+            cursor.execute('''
+                SELECT AVG(rating) as avg_rating FROM agent_feedback 
+                WHERE timestamp > NOW() - INTERVAL '7 days'
+            ''')
+            result = cursor.fetchone()['avg_rating']
+            metrics['avg_feedback'] = float(result) if result else 0
             
             conn.close()
             return metrics
             
         except Exception as e:
-            print(f"Failed to get metrics: {str(e)}")
+            st.error(f"Failed to get metrics: {str(e)}")
+            if 'conn' in locals():
+                conn.close()
             return {
                 'total_tickets': 0,
                 'processed_tickets': 0,
@@ -281,12 +240,13 @@ class Database:
     def log_system_event(self, function_name, status, details=""):
         """Log system events"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self.get_connection()
+            cursor = conn.cursor()
             
-            conn.execute('''
+            cursor.execute('''
                 INSERT INTO system_logs (timestamp, function_name, status, details)
-                VALUES (?, ?, ?, ?)
-            ''', (datetime.now().isoformat(), function_name, status, details))
+                VALUES (%s, %s, %s, %s)
+            ''', (datetime.now(), function_name, status, details))
             
             conn.commit()
             conn.close()
@@ -294,3 +254,5 @@ class Database:
         except Exception as e:
             # Don't show error for logging failures
             pass
+            
+       

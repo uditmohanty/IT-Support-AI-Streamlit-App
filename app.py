@@ -25,26 +25,43 @@ def init_components():
         'db': Database()
     }
 
+def test_database_connection():
+    """Test database connection"""
+    try:
+        db = Database()
+        metrics = db.get_dashboard_metrics()
+        return True, "Database connected successfully"
+    except Exception as e:
+        return False, f"Database connection failed: {str(e)}"
+
 def main():
     components = init_components()
     
     # Sidebar
     with st.sidebar:
-        st.title("🤖 IT Support AI")
+        st.title("IT Support AI")
         st.markdown("---")
         
         # Quick Actions
         st.subheader("Quick Actions")
         
-        if st.button("🔄 Fetch New Tickets"):
+        if st.button("Fetch New Tickets"):
             fetch_tickets(components)
         
-        if st.button("🧠 Analyze Tickets"):
+        if st.button("Analyze Tickets"):
             analyze_tickets(components)
         
-        if st.button("📊 Refresh Data"):
+        if st.button("Refresh Data"):
             st.cache_data.clear()
             st.rerun()
+        
+        # Add database test button
+        if st.button("Test Database"):
+            success, message = test_database_connection()
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
         
         st.markdown("---")
         
@@ -53,13 +70,13 @@ def main():
         show_system_status(components)
     
     # Main content
-    st.title("🎯 IT Support AI Dashboard")
+    st.title("IT Support AI Dashboard")
     
     # Metrics row
     show_metrics(components['db'])
     
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "🎫 Active Tickets", "🧠 AI Analysis", "📈 Analytics"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Active Tickets", "AI Analysis", "Analytics"])
     
     with tab1:
         show_overview(components['db'])
@@ -80,7 +97,7 @@ def fetch_tickets(components):
         
         if result['success']:
             if components['db'].save_tickets(result['tickets']):
-                st.success(f"✅ Fetched and saved {result['count']} tickets")
+                st.success(f"Fetched and saved {result['count']} tickets")
                 components['db'].log_system_event("fetch_tickets", "SUCCESS", f"Fetched {result['count']} tickets")
             else:
                 st.error("Failed to save tickets to database")
@@ -115,7 +132,7 @@ def analyze_tickets(components):
                 if components['db'].save_processed_ticket(result['ticket_id'], result['analysis']):
                     success_count += 1
         
-        st.success(f"✅ Successfully analyzed {success_count} tickets")
+        st.success(f"Successfully analyzed {success_count} tickets")
         components['db'].log_system_event("analyze_tickets", "SUCCESS", f"Analyzed {success_count} tickets")
 
 def show_system_status(components):
@@ -123,9 +140,9 @@ def show_system_status(components):
     # Test Jira connection
     try:
         tickets = components['db'].get_tickets(limit=1)
-        jira_status = "🟢 Connected" if not tickets.empty else "🟡 No Data"
+        jira_status = "Connected" if not tickets.empty else "No Data"
     except:
-        jira_status = "🔴 Error"
+        jira_status = "Error"
     
     st.write(f"**Jira:** {jira_status}")
     
@@ -140,18 +157,18 @@ def show_system_status(components):
             'priority': 'Low'
         }
         ai_result = components['ai'].analyze_ticket(test_ticket)
-        ai_status = "🟢 Ready" if ai_result['success'] else "🔴 Error"
+        ai_status = "Ready" if ai_result['success'] else "Error"
     except:
-        ai_status = "🔴 Error"
+        ai_status = "Error"
     
     st.write(f"**AI:** {ai_status}")
     
     # Database status
     try:
         metrics = components['db'].get_dashboard_metrics()
-        db_status = "🟢 Connected"
+        db_status = "Connected"
     except:
-        db_status = "🔴 Error"
+        db_status = "Error"
     
     st.write(f"**Database:** {db_status}")
 
@@ -163,31 +180,31 @@ def show_metrics(db):
     
     with col1:
         st.metric(
-            label="📊 Total Tickets",
+            label="Total Tickets",
             value=metrics['total_tickets']
         )
     
     with col2:
         st.metric(
-            label="🤖 AI Processed",
+            label="AI Processed",
             value=metrics['processed_tickets']
         )
     
     with col3:
         st.metric(
-            label="🎯 Avg Confidence",
+            label="Avg Confidence",
             value=f"{metrics['avg_confidence']:.1%}"
         )
     
     with col4:
         st.metric(
-            label="⏳ Pending",
+            label="Pending",
             value=metrics['pending_tickets']
         )
 
 def show_overview(db):
     """Show overview dashboard"""
-    st.subheader("📊 System Overview")
+    st.subheader("System Overview")
     
     # Recent tickets
     col1, col2 = st.columns(2)
@@ -212,7 +229,7 @@ def show_overview(db):
 
 def show_active_tickets(db):
     """Show active tickets management"""
-    st.subheader("🎫 Active Tickets")
+    st.subheader("Active Tickets")
     
     # Filters
     col1, col2, col3 = st.columns(3)
@@ -263,7 +280,7 @@ def show_active_tickets(db):
 
 def show_ai_analysis(db):
     """Show AI analysis results"""
-    st.subheader("🧠 AI Analysis Results")
+    st.subheader("AI Analysis Results")
     
     processed_tickets = db.get_processed_tickets()
     
@@ -271,7 +288,7 @@ def show_ai_analysis(db):
         for _, ticket in processed_tickets.iterrows():
             analysis = ticket['analysis_parsed']
             
-            with st.expander(f"🎫 {ticket['ticket_id']} - {ticket['summary']}", expanded=False):
+            with st.expander(f"{ticket['ticket_id']} - {ticket['summary']}", expanded=False):
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -286,7 +303,7 @@ def show_ai_analysis(db):
                     st.write(f"*Est. Resolution:* {analysis.get('estimated_resolution_time', 'Unknown')}")
                 
                 # Suggested solutions
-                st.write("*🔧 Suggested Solutions:*")
+                st.write("*Suggested Solutions:*")
                 solutions = analysis.get('suggested_solutions', [])
                 
                 for i, solution in enumerate(solutions, 1):
@@ -300,21 +317,19 @@ def show_ai_analysis(db):
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    if st.button(f"✅ Apply", key=f"apply_{ticket['ticket_id']}"):
+                    if st.button(f"Apply", key=f"apply_{ticket['ticket_id']}"):
                         save_feedback(db, ticket['ticket_id'], 5, "Applied", "Applied AI suggestion")
                 
                 with col2:
-                    if st.button(f"✏️ Modify", key=f"modify_{ticket['ticket_id']}"):
-                        # In a real app, you'd have a form for modification details
+                    if st.button(f"Modify", key=f"modify_{ticket['ticket_id']}"):
                         save_feedback(db, ticket['ticket_id'], 3, "Modified", "Modified AI suggestion")
                 
                 with col3:
-                    if st.button(f"❌ Reject", key=f"reject_{ticket['ticket_id']}"):
-                        # In a real app, you'd have a form for rejection reason
+                    if st.button(f"Reject", key=f"reject_{ticket['ticket_id']}"):
                         save_feedback(db, ticket['ticket_id'], 1, "Rejected", "Rejected AI suggestion")
                 
                 with col4:
-                    if st.button(f"❓ Escalate", key=f"escalate_{ticket['ticket_id']}"):
+                    if st.button(f"Escalate", key=f"escalate_{ticket['ticket_id']}"):
                         save_feedback(db, ticket['ticket_id'], 2, "Escalated", "Escalated for manual review")
     else:
         st.info("No processed tickets found")
@@ -339,7 +354,7 @@ def save_feedback(db, ticket_id, rating, action, comments):
 
 def show_analytics(db):
     """Show analytics and reports"""
-    st.subheader("📈 Analytics & Reports")
+    st.subheader("Analytics & Reports")
     
     # Time-based metrics
     tickets = db.get_tickets(limit=1000)
