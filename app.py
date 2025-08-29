@@ -3,10 +3,18 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
+import logging
 from config import Config
 from utils.jira_client import JiraClient
 from utils.ai_analyzer import AIAnalyzer
 from utils.database import Database
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configure Streamlit
 st.set_page_config(
@@ -15,6 +23,70 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Performance Enhancement: Add caching for expensive operations
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_tickets(limit=100):
+    """Get tickets with caching"""
+    try:
+        db = Database()
+        return db.get_tickets(limit=limit)
+    except Exception as e:
+        logger.error(f"Error getting cached tickets: {str(e)}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def get_cached_metrics():
+    """Get dashboard metrics with caching"""
+    try:
+        db = Database()
+        return db.get_dashboard_metrics()
+    except Exception as e:
+        logger.error(f"Error getting cached metrics: {str(e)}")
+        return {
+            'total_tickets': 0,
+            'processed_tickets': 0,
+            'avg_confidence': 0,
+            'pending_tickets': 0,
+            'avg_feedback': 0
+        }
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_processed_tickets(limit=50):
+    """Get processed tickets with caching"""
+    try:
+        db = Database()
+        return db.get_processed_tickets(limit=limit)
+    except Exception as e:
+        logger.error(f"Error getting cached processed tickets: {str(e)}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=1800)  # Cache for 30 minutes
+def get_cached_analytics_data():
+    """Get analytics data with caching"""
+    try:
+        db = Database()
+        return db.get_tickets(limit=1000)
+    except Exception as e:
+        logger.error(f"Error getting cached analytics data: {str(e)}")
+        return pd.DataFrame()
+
+# Error Handling & Monitoring
+def safe_execute(func, *args, **kwargs):
+    """Safely execute functions with error handling"""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        logger.error(f"Error in {func.__name__}: {str(e)}")
+        st.error(f"Operation failed: {str(e)}")
+        return None
+
+def log_user_action(action, details=""):
+    """Log user actions for monitoring"""
+    try:
+        logger.info(f"User action: {action} - {details}")
+    except Exception:
+        pass
 
 # Initialize components
 @st.cache_resource
@@ -32,6 +104,7 @@ def test_database_connection():
         metrics = db.get_dashboard_metrics()
         return True, "Database connected successfully"
     except Exception as e:
+        logger.error(f"Database connection test failed: {str(e)}")
         return False, f"Database connection failed: {str(e)}"
 
 def check_data_integrity(db):
@@ -70,6 +143,7 @@ def check_data_integrity(db):
             'duplicates': duplicates
         }
     except Exception as e:
+        logger.error(f"Data integrity check failed: {str(e)}")
         st.error(f"Failed to check data integrity: {str(e)}")
         return None
 
@@ -95,8 +169,13 @@ def clean_database(db):
         conn.commit()
         conn.close()
         
+        # Clear cache after database changes
+        get_cached_processed_tickets.clear()
+        get_cached_metrics.clear()
+        
         return duplicates_removed
     except Exception as e:
+        logger.error(f"Database cleaning failed: {str(e)}")
         st.error(f"Failed to clean database: {str(e)}")
         return 0
 
@@ -108,8 +187,14 @@ def reset_processed_tickets(db):
         cursor.execute("DELETE FROM processed_tickets")
         conn.commit()
         conn.close()
+        
+        # Clear cache after database changes
+        get_cached_processed_tickets.clear()
+        get_cached_metrics.clear()
+        
         return True
     except Exception as e:
+        logger.error(f"Reset processed tickets failed: {str(e)}")
         st.error(f"Failed to reset processed tickets: {str(e)}")
         return False
 
@@ -125,17 +210,26 @@ def main():
         st.subheader("Quick Actions")
         
         if st.button("Fetch New Tickets"):
+            log_user_action("fetch_tickets")
             fetch_tickets(components)
         
         if st.button("Analyze Tickets"):
+            log_user_action("analyze_tickets")
             analyze_tickets(components)
         
         if st.button("Refresh Data"):
+            log_user_action("refresh_data")
+            # Clear all caches
             st.cache_data.clear()
+            get_cached_tickets.clear()
+            get_cached_metrics.clear()
+            get_cached_processed_tickets.clear()
+            get_cached_analytics_data.clear()
             st.rerun()
         
         # Add database test button
         if st.button("Test Database"):
+            log_user_action("test_database")
             success, message = test_database_connection()
             if success:
                 st.success(message)
@@ -148,8 +242,9 @@ def main():
         st.subheader("Database Maintenance")
         
         if st.button("🔍 Check Data Integrity"):
+            log_user_action("check_integrity")
             with st.spinner("Checking data integrity..."):
-                integrity_data = check_data_integrity(components['db'])
+                integrity_data = safe_execute(check_data_integrity, components['db'])
                 
                 if integrity_data:
                     st.write(f"**Total tickets:** {integrity_data['total_tickets']}")
@@ -165,9 +260,10 @@ def main():
                         st.success("No duplicates found!")
         
         if st.button("🧹 Clean Database"):
+            log_user_action("clean_database")
             with st.spinner("Cleaning database..."):
-                duplicates_removed = clean_database(components['db'])
-                if duplicates_removed > 0:
+                duplicates_removed = safe_execute(clean_database, components['db'])
+                if duplicates_removed and duplicates_removed > 0:
                     st.success(f"Cleaned up {duplicates_removed} duplicate processed tickets")
                     components['db'].log_system_event("clean_database", "SUCCESS", f"Removed {duplicates_removed} duplicates")
                     st.rerun()
@@ -175,9 +271,10 @@ def main():
                     st.info("No duplicates to clean")
         
         if st.button("🔄 Reset All Processed Tickets"):
+            log_user_action("reset_processed")
             if st.session_state.get('confirm_reset', False):
                 with st.spinner("Resetting processed tickets..."):
-                    if reset_processed_tickets(components['db']):
+                    if safe_execute(reset_processed_tickets, components['db']):
                         st.success("All processed ticket records cleared")
                         components['db'].log_system_event("reset_processed", "SUCCESS", "All processed tickets cleared")
                         st.session_state.confirm_reset = False
@@ -196,22 +293,22 @@ def main():
     st.title("IT Support AI Dashboard")
     
     # Metrics row
-    show_metrics(components['db'])
+    show_metrics()
     
     # Main content tabs
     tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Active Tickets", "AI Analysis", "Analytics"])
     
     with tab1:
-        show_overview(components['db'])
+        show_overview()
     
     with tab2:
-        show_active_tickets(components['db'])
+        show_active_tickets()
     
     with tab3:
         show_ai_analysis(components)
     
     with tab4:
-        show_analytics(components['db'])
+        show_analytics()
 
 def fetch_tickets(components):
     """Fetch tickets from Jira"""
@@ -223,6 +320,11 @@ def fetch_tickets(components):
                 if components['db'].save_tickets(result['tickets']):
                     st.success(f"Fetched and saved {result['count']} tickets")
                     components['db'].log_system_event("fetch_tickets", "SUCCESS", f"Fetched {result['count']} tickets")
+                    
+                    # Clear relevant caches after new data
+                    get_cached_tickets.clear()
+                    get_cached_metrics.clear()
+                    get_cached_analytics_data.clear()
                 else:
                     st.error("Failed to save tickets to database")
                     components['db'].log_system_event("fetch_tickets", "ERROR", "Failed to save tickets")
@@ -230,18 +332,32 @@ def fetch_tickets(components):
                 st.error(f"Failed to fetch tickets: {result['error']}")
                 components['db'].log_system_event("fetch_tickets", "ERROR", result['error'])
         except Exception as e:
+            logger.error(f"Error fetching tickets: {str(e)}")
             st.error(f"Error fetching tickets: {str(e)}")
             components['db'].log_system_event("fetch_tickets", "ERROR", str(e))
 
 def analyze_tickets(components):
     """Analyze tickets with AI"""
     try:
-        # Get unprocessed tickets
-        all_tickets = components['db'].get_tickets()
-        processed_tickets = components['db'].get_processed_tickets()
+        # Get unprocessed tickets using cached function
+        all_tickets = get_cached_tickets()
+        processed_tickets = get_cached_processed_tickets()
         
         processed_ids = set(processed_tickets['ticket_id'].tolist()) if not processed_tickets.empty else set()
         unprocessed = all_tickets[~all_tickets['id'].isin(processed_ids)]
+        
+        # Additional safety check - verify no duplicates in processed tickets
+        if not processed_tickets.empty:
+            duplicate_count = len(processed_tickets) - len(processed_ids)
+            if duplicate_count > 0:
+                st.warning(f"⚠️ Found {duplicate_count} duplicate processed records. Consider cleaning the database.")
+                
+                # Auto-suggest cleaning
+                if st.button("🧹 Clean Now", key="auto_clean_suggestion"):
+                    duplicates_removed = clean_database(components['db'])
+                    if duplicates_removed > 0:
+                        st.success(f"Removed {duplicates_removed} duplicates")
+                        st.rerun()
         
         if unprocessed.empty:
             st.info("No unprocessed tickets found")
@@ -270,12 +386,17 @@ def analyze_tickets(components):
             if success_count > 0:
                 st.success(f"Successfully analyzed {success_count} tickets")
                 components['db'].log_system_event("analyze_tickets", "SUCCESS", f"Analyzed {success_count} tickets")
+                
+                # Clear cache after processing new tickets
+                get_cached_processed_tickets.clear()
+                get_cached_metrics.clear()
             
             if error_count > 0:
                 st.warning(f"Failed to analyze {error_count} tickets")
                 components['db'].log_system_event("analyze_tickets", "PARTIAL", f"Failed {error_count} tickets")
                 
     except Exception as e:
+        logger.error(f"Error analyzing tickets: {str(e)}")
         st.error(f"Error analyzing tickets: {str(e)}")
         components['db'].log_system_event("analyze_tickets", "ERROR", str(e))
 
@@ -283,7 +404,7 @@ def show_system_status(components):
     """Show system status indicators"""
     # Test Jira connection
     try:
-        tickets = components['db'].get_tickets(limit=1)
+        tickets = get_cached_tickets(limit=1)
         jira_status = "🟢 Connected" if not tickets.empty else "🟡 No Data"
     except Exception as e:
         jira_status = "🔴 Error"
@@ -309,31 +430,47 @@ def show_system_status(components):
     
     # Database status
     try:
-        metrics = components['db'].get_dashboard_metrics()
+        metrics = get_cached_metrics()
         db_status = "🟢 Connected"
     except Exception as e:
         db_status = "🔴 Error"
     
     st.write(f"**Database:** {db_status}")
 
-def show_metrics(db):
-    """Show dashboard metrics"""
+def show_metrics():
+    """Show dashboard metrics using cached data"""
     try:
-        metrics = db.get_dashboard_metrics()
+        metrics = get_cached_metrics()
         
         col1, col2, col3, col4 = st.columns(4)
+        
+        # Check for data integrity issues
+        total_tickets = metrics['total_tickets']
+        processed_tickets = metrics['processed_tickets']
+        
+        # Calculate actual unique processed tickets
+        processed_df = get_cached_processed_tickets()
+        unique_processed = len(processed_df['ticket_id'].unique()) if not processed_df.empty else 0
         
         with col1:
             st.metric(
                 label="Total Tickets",
-                value=metrics['total_tickets']
+                value=total_tickets
             )
         
         with col2:
-            st.metric(
-                label="AI Processed",
-                value=metrics['processed_tickets']
-            )
+            # Show unique processed count and warn if there's a discrepancy
+            if processed_tickets > unique_processed:
+                st.metric(
+                    label="AI Processed",
+                    value=unique_processed,
+                    delta=f"⚠️ {processed_tickets - unique_processed} duplicates"
+                )
+            else:
+                st.metric(
+                    label="AI Processed",
+                    value=processed_tickets
+                )
         
         with col3:
             avg_conf = metrics.get('avg_confidence', 0)
@@ -343,15 +480,19 @@ def show_metrics(db):
             )
         
         with col4:
+            # Recalculate pending based on unique processed tickets
+            pending = max(0, total_tickets - unique_processed)
             st.metric(
                 label="Pending",
-                value=metrics['pending_tickets']
+                value=pending
             )
+            
     except Exception as e:
+        logger.error(f"Failed to load metrics: {str(e)}")
         st.error(f"Failed to load metrics: {str(e)}")
 
-def show_overview(db):
-    """Show overview dashboard"""
+def show_overview():
+    """Show overview dashboard using cached data"""
     st.subheader("System Overview")
     
     try:
@@ -360,7 +501,7 @@ def show_overview(db):
         
         with col1:
             st.write("**Recent Tickets**")
-            recent_tickets = db.get_tickets(limit=10)
+            recent_tickets = get_cached_tickets(limit=10)
             if not recent_tickets.empty:
                 st.dataframe(
                     recent_tickets[['id', 'summary', 'category', 'priority', 'status']],
@@ -378,10 +519,11 @@ def show_overview(db):
             else:
                 st.info("No data for chart")
     except Exception as e:
+        logger.error(f"Failed to load overview: {str(e)}")
         st.error(f"Failed to load overview: {str(e)}")
 
-def show_active_tickets(db):
-    """Show active tickets management"""
+def show_active_tickets():
+    """Show active tickets management using cached data"""
     st.subheader("Active Tickets")
     
     try:
@@ -398,7 +540,7 @@ def show_active_tickets(db):
             priority_filter = st.selectbox("Priority", ["All"] + Config.PRIORITIES)
         
         # Get tickets
-        tickets = db.get_tickets(limit=100)
+        tickets = get_cached_tickets(limit=100)
         
         if not tickets.empty:
             # Apply filters
@@ -432,14 +574,15 @@ def show_active_tickets(db):
         else:
             st.info("No active tickets found")
     except Exception as e:
+        logger.error(f"Failed to load active tickets: {str(e)}")
         st.error(f"Failed to load active tickets: {str(e)}")
 
 def show_ai_analysis(components):
-    """Show AI analysis results"""
+    """Show AI analysis results using cached data"""
     st.subheader("AI Analysis Results")
     
     try:
-        processed_tickets = components['db'].get_processed_tickets()
+        processed_tickets = get_cached_processed_tickets()
         
         if not processed_tickets.empty:
             for _, ticket in processed_tickets.iterrows():
@@ -475,22 +618,23 @@ def show_ai_analysis(components):
                     
                     with col1:
                         if st.button(f"✅ Apply", key=f"apply_{ticket['ticket_id']}"):
-                            save_feedback(components, ticket['ticket_id'], 5, "Applied", "Applied AI suggestion")
+                            safe_execute(save_feedback, components, ticket['ticket_id'], 5, "Applied", "Applied AI suggestion")
                     
                     with col2:
                         if st.button(f"✏️ Modify", key=f"modify_{ticket['ticket_id']}"):
-                            save_feedback(components, ticket['ticket_id'], 3, "Modified", "Modified AI suggestion")
+                            safe_execute(save_feedback, components, ticket['ticket_id'], 3, "Modified", "Modified AI suggestion")
                     
                     with col3:
                         if st.button(f"❌ Reject", key=f"reject_{ticket['ticket_id']}"):
-                            save_feedback(components, ticket['ticket_id'], 1, "Rejected", "Rejected AI suggestion")
+                            safe_execute(save_feedback, components, ticket['ticket_id'], 1, "Rejected", "Rejected AI suggestion")
                     
                     with col4:
                         if st.button(f"⬆️ Escalate", key=f"escalate_{ticket['ticket_id']}"):
-                            save_feedback(components, ticket['ticket_id'], 2, "Escalated", "Escalated for manual review")
+                            safe_execute(save_feedback, components, ticket['ticket_id'], 2, "Escalated", "Escalated for manual review")
         else:
             st.info("No processed tickets found")
     except Exception as e:
+        logger.error(f"Failed to load AI analysis: {str(e)}")
         st.error(f"Failed to load AI analysis: {str(e)}")
 
 def save_feedback(components, ticket_id, rating, action, comments):
@@ -516,16 +660,17 @@ def save_feedback(components, ticket_id, rating, action, comments):
             st.error("Failed to save feedback")
             components['db'].log_system_event("save_feedback", "ERROR", f"Failed to save feedback for {ticket_id}")
     except Exception as e:
+        logger.error(f"Error saving feedback: {str(e)}")
         st.error(f"Error saving feedback: {str(e)}")
         components['db'].log_system_event("save_feedback", "ERROR", str(e))
 
-def show_analytics(db):
-    """Show analytics and reports"""
+def show_analytics():
+    """Show analytics and reports using cached data"""
     st.subheader("Analytics & Reports")
     
     try:
         # Time-based metrics
-        tickets = db.get_tickets(limit=1000)
+        tickets = get_cached_analytics_data()
         
         if not tickets.empty:
             # Convert created date
@@ -553,6 +698,7 @@ def show_analytics(db):
         else:
             st.info("No data available for analytics")
     except Exception as e:
+        logger.error(f"Failed to load analytics: {str(e)}")
         st.error(f"Failed to load analytics: {str(e)}")
 
 if __name__ == "__main__":
